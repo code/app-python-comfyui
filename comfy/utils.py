@@ -457,8 +457,27 @@ def flux_to_diffusers(mmdit_config, output_prefix=""):
             key_map["{}add_k_proj.{}".format(k, end)] = (qkv, (0, hidden_size, hidden_size))
             key_map["{}add_v_proj.{}".format(k, end)] = (qkv, (0, hidden_size * 2, hidden_size))
 
-        block_map = {"attn.to_out.0.weight": "img_attn.proj.weight",
-                     "attn.to_out.0.bias": "img_attn.proj.bias",
+        block_map = {
+                        "attn.to_out.0.weight": "img_attn.proj.weight",
+                        "attn.to_out.0.bias": "img_attn.proj.bias",
+                        "norm1.linear.weight": "img_mod.lin.weight",
+                        "norm1.linear.bias": "img_mod.lin.bias",
+                        "norm1_context.linear.weight": "txt_mod.lin.weight",
+                        "norm1_context.linear.bias": "txt_mod.lin.bias",
+                        "attn.to_add_out.weight": "txt_attn.proj.weight",
+                        "attn.to_add_out.bias": "txt_attn.proj.bias",
+                        "ff.net.0.proj.weight": "img_mlp.0.weight",
+                        "ff.net.0.proj.bias": "img_mlp.0.bias",
+                        "ff.net.2.weight": "img_mlp.2.weight",
+                        "ff.net.2.bias": "img_mlp.2.bias",
+                        "ff_context.net.0.proj.weight": "txt_mlp.0.weight",
+                        "ff_context.net.0.proj.bias": "txt_mlp.0.bias",
+                        "ff_context.net.2.weight": "txt_mlp.2.weight",
+                        "ff_context.net.2.bias": "txt_mlp.2.bias",
+                        "attn.norm_q.weight": "img_attn.norm.query_norm.scale",
+                        "attn.norm_k.weight": "img_attn.norm.key_norm.scale",
+                        "attn.norm_added_q.weight": "txt_attn.norm.query_norm.scale",
+                        "attn.norm_added_k.weight": "txt_attn.norm.key_norm.scale",
                     }
 
         for k in block_map:
@@ -474,15 +493,43 @@ def flux_to_diffusers(mmdit_config, output_prefix=""):
             key_map["{}to_q.{}".format(k, end)] = (qkv, (0, 0, hidden_size))
             key_map["{}to_k.{}".format(k, end)] = (qkv, (0, hidden_size, hidden_size))
             key_map["{}to_v.{}".format(k, end)] = (qkv, (0, hidden_size * 2, hidden_size))
-            key_map["{}proj_mlp.{}".format(k, end)] = (qkv, (0, hidden_size * 3, hidden_size))
+            key_map["{}.proj_mlp.{}".format(prefix_from, end)] = (qkv, (0, hidden_size * 3, hidden_size * 4))
 
-        block_map = {#TODO
+        block_map = {
+                        "norm.linear.weight": "modulation.lin.weight",
+                        "norm.linear.bias": "modulation.lin.bias",
+                        "proj_out.weight": "linear2.weight",
+                        "proj_out.bias": "linear2.bias",
+                        "attn.norm_q.weight": "norm.query_norm.scale",
+                        "attn.norm_k.weight": "norm.key_norm.scale",
                     }
 
         for k in block_map:
             key_map["{}.{}".format(prefix_from, k)] = "{}.{}".format(prefix_to, block_map[k])
 
-    MAP_BASIC = { #TODO
+    MAP_BASIC = {
+        ("final_layer.linear.bias", "proj_out.bias"),
+        ("final_layer.linear.weight", "proj_out.weight"),
+        ("img_in.bias", "x_embedder.bias"),
+        ("img_in.weight", "x_embedder.weight"),
+        ("time_in.in_layer.bias", "time_text_embed.timestep_embedder.linear_1.bias"),
+        ("time_in.in_layer.weight", "time_text_embed.timestep_embedder.linear_1.weight"),
+        ("time_in.out_layer.bias", "time_text_embed.timestep_embedder.linear_2.bias"),
+        ("time_in.out_layer.weight", "time_text_embed.timestep_embedder.linear_2.weight"),
+        ("txt_in.bias", "context_embedder.bias"),
+        ("txt_in.weight", "context_embedder.weight"),
+        ("vector_in.in_layer.bias", "time_text_embed.text_embedder.linear_1.bias"),
+        ("vector_in.in_layer.weight", "time_text_embed.text_embedder.linear_1.weight"),
+        ("vector_in.out_layer.bias", "time_text_embed.text_embedder.linear_2.bias"),
+        ("vector_in.out_layer.weight", "time_text_embed.text_embedder.linear_2.weight"),
+        ("guidance_in.in_layer.bias", "time_text_embed.guidance_embedder.linear_1.bias"),
+        ("guidance_in.in_layer.weight", "time_text_embed.guidance_embedder.linear_1.weight"),
+        ("guidance_in.out_layer.bias", "time_text_embed.guidance_embedder.linear_2.bias"),
+        ("guidance_in.out_layer.weight", "time_text_embed.guidance_embedder.linear_2.weight"),
+        ("final_layer.adaLN_modulation.1.bias", "norm_out.linear.bias", swap_scale_shift),
+        ("final_layer.adaLN_modulation.1.weight", "norm_out.linear.weight", swap_scale_shift),
+        ("pos_embed_input.bias", "controlnet_x_embedder.bias"),
+        ("pos_embed_input.weight", "controlnet_x_embedder.weight"),
     }
 
     for k in MAP_BASIC:
@@ -666,7 +713,9 @@ def common_upscale(samples, width, height, upscale_method, crop):
             return torch.nn.functional.interpolate(s, size=(height, width), mode=upscale_method)
 
 def get_tiled_scale_steps(width, height, tile_x, tile_y, overlap):
-    return math.ceil((height / (tile_y - overlap))) * math.ceil((width / (tile_x - overlap)))
+    rows = 1 if height <= tile_y else math.ceil((height - overlap) / (tile_y - overlap))
+    cols = 1 if width <= tile_x else math.ceil((width - overlap) / (tile_x - overlap))
+    return rows * cols
 
 @torch.inference_mode()
 def tiled_scale_multidim(samples, function, tile=(64, 64), overlap = 8, upscale_amount = 4, out_channels = 3, output_device="cpu", pbar = None):
@@ -675,10 +724,20 @@ def tiled_scale_multidim(samples, function, tile=(64, 64), overlap = 8, upscale_
 
     for b in range(samples.shape[0]):
         s = samples[b:b+1]
+
+        # handle entire input fitting in a single tile
+        if all(s.shape[d+2] <= tile[d] for d in range(dims)):
+            output[b:b+1] = function(s).to(output_device)
+            if pbar is not None:
+                pbar.update(1)
+            continue
+
         out = torch.zeros([s.shape[0], out_channels] + list(map(lambda a: round(a * upscale_amount), s.shape[2:])), device=output_device)
         out_div = torch.zeros([s.shape[0], out_channels] + list(map(lambda a: round(a * upscale_amount), s.shape[2:])), device=output_device)
 
-        for it in itertools.product(*map(lambda a: range(0, a[0], a[1] - overlap), zip(s.shape[2:], tile))):
+        positions = [range(0, s.shape[d+2], tile[d] - overlap) if s.shape[d+2] > tile[d] else [0] for d in range(dims)]
+
+        for it in itertools.product(*positions):
             s_in = s
             upscaled = []
 
@@ -687,15 +746,16 @@ def tiled_scale_multidim(samples, function, tile=(64, 64), overlap = 8, upscale_
                 l = min(tile[d], s.shape[d + 2] - pos)
                 s_in = s_in.narrow(d + 2, pos, l)
                 upscaled.append(round(pos * upscale_amount))
+
             ps = function(s_in).to(output_device)
             mask = torch.ones_like(ps)
             feather = round(overlap * upscale_amount)
+
             for t in range(feather):
                 for d in range(2, dims + 2):
-                    m = mask.narrow(d, t, 1)
-                    m *= ((1.0/feather) * (t + 1))
-                    m = mask.narrow(d, mask.shape[d] -1 -t, 1)
-                    m *= ((1.0/feather) * (t + 1))
+                    a = (t + 1) / feather
+                    mask.narrow(d, t, 1).mul_(a)
+                    mask.narrow(d, mask.shape[d] - 1 - t, 1).mul_(a)
 
             o = out
             o_d = out_div
@@ -703,8 +763,8 @@ def tiled_scale_multidim(samples, function, tile=(64, 64), overlap = 8, upscale_
                 o = o.narrow(d + 2, upscaled[d], mask.shape[d + 2])
                 o_d = o_d.narrow(d + 2, upscaled[d], mask.shape[d + 2])
 
-            o += ps * mask
-            o_d += mask
+            o.add_(ps * mask)
+            o_d.add_(mask)
 
             if pbar is not None:
                 pbar.update(1)
